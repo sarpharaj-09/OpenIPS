@@ -1,4 +1,4 @@
-# OpenIPS: Compact 2.4 GHz Patch Antenna for RSSI-Based Indoor Localization
+# OpenIPS:RSSI-Based Indoor Localization Using Custom compact 2.4 GHz Microstrip Patch Antenna
 
 <p align="center">
   <strong>A custom microstrip patch antenna and ESP32-based RSSI trilateration system for indoor positioning of GPS-denied mobile nodes</strong>
