@@ -1,0 +1,54 @@
+clear; clc;
+
+L_range  = [27.5, 28.0, 28.5] * 1e-3;     % only 3 values
+y0_range = [9.0, 9.5, 10.0] * 1e-3;        % only 3 values
+
+freq_band = linspace(2.2e9, 2.6e9, 21);    % fewer points too
+
+W  = 0.0380;
+H  = 0.0016;
+Wf = 0.0031;
+NotchWidth_ratio = 1.53;
+target_freq = 2.4e9;
+target_Z0   = 50;
+
+nL = length(L_range); ny0 = length(y0_range);
+R_at_res = nan(ny0,nL); f_res = nan(ny0,nL); S11_at_target = nan(ny0,nL);
+
+total = nL*ny0; count = 0;
+
+for i = 1:nL
+    for j = 1:ny0
+        count = count+1;
+        fprintf('[%d/%d] Starting L=%.2fmm, y0=%.2fmm ... ', count, total, L_range(i)*1e3, y0_range(j)*1e3);
+        t1 = tic;
+
+        L = L_range(i); y0 = y0_range(j);
+        p = patchMicrostripInsetfed;
+        p.Length=L; p.Width=W; p.Height=H;
+        p.PatchCenterOffset=[0 0]; p.FeedOffset=[-L 0];
+        p.StripLineWidth=Wf; p.NotchLength=y0; p.NotchWidth=Wf*NotchWidth_ratio;
+        p.GroundPlaneLength=2*L; p.GroundPlaneWidth=2*W; p.Tilt=0;
+        p.Substrate=dielectric('FR4'); p.Substrate.EpsilonR=4.4; p.Substrate.LossTangent=0.02;
+
+        mesh(p,'MaxEdgeLength',0.004);   % coarser mesh -- key speed fix
+        fprintf('meshed (%.1fs) ', toc(t1));
+
+        Z = impedance(p, freq_band);
+        fprintf('solved (%.1fs total)\n', toc(t1));
+
+        R = real(Z); X = imag(Z);
+        sc = find(diff(sign(X))~=0);
+        if isempty(sc); continue; end
+        [~,idxc] = min(abs(freq_band(sc)-target_freq));
+        idx = sc(idxc);
+        frac = -X(idx)/(X(idx+1)-X(idx));
+        f_res(j,i) = freq_band(idx) + frac*(freq_band(idx+1)-freq_band(idx));
+        R_at_res(j,i) = R(idx) + frac*(R(idx+1)-R(idx));
+
+        Zi = interp1(freq_band, Z, target_freq);
+        S11_at_target(j,i) = 20*log10(abs((Zi-target_Z0)/(Zi+target_Z0)));
+    end
+end
+
+disp('DONE'); disp(R_at_res); disp(f_res/1e9); disp(S11_at_target)
