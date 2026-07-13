@@ -3,6 +3,7 @@
 #include "common.h"
 #include <esp_now.h>
 #include <WiFi.h>
+#include <math.h>   // for fabsf() used in anchor outlier rejection
 
 // Ensure we're using Arduino-ESP32 core 3.x for esp_now_recv_info_t support
 #if ESP_ARDUINO_VERSION_MAJOR < 3
@@ -44,7 +45,7 @@ void setup_mobile() {
     Serial.println("[MOBILE] ERROR: Failed to add broadcast peer.");
     return;
   }
-  
+
   beaconData.beaconId = 0;
 }
 
@@ -70,19 +71,61 @@ const int16_t RSSI_UNAVAILABLE = -127;
 const unsigned long READY_HEARTBEAT_MS = 2000;
 unsigned long lastReadyHeartbeat = 0;
 
+// --- EMA smoothing state ---
+// Lower EMA_ALPHA = smoother but laggier response to mobile movement.
+// Higher EMA_ALPHA = more responsive but noisier. Tune from real grid data;
+// 0.3 is a reasonable starting point.
+const float EMA_ALPHA = 0.3f;
+float smoothedRssi = 0.0f;
+bool firstSample = true;
+
+// --- Outlier rejection ---
+// Reject a raw sample if it jumps more than this many dB away from the
+// current smoothed value in one packet. Guards against stray multipath
+// spikes corrupting the average. Only active once firstSample is false,
+// so it never blocks the very first real reading.
+const float OUTLIER_THRESHOLD_DB = 15.0f;
+
+uint16_t lastBeaconSeq = 0;
+
 void sendAnchorReadyHeartbeat() {
   AnchorReport readyReport;
   readyReport.anchorId = ANCHOR_ID;
   readyReport.rssi = ANCHOR_READY_RSSI;
+  readyReport.beaconSeq = 0;
   esp_now_send(gatewayMac, (uint8_t *)&readyReport, sizeof(readyReport));
 }
 
 void onDataRecv_anchor(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
   if (len != sizeof(BeaconMsg)) return;
 
+  BeaconMsg incoming;
+  memcpy(&incoming, incomingData, sizeof(incoming));
+  lastBeaconSeq = incoming.beaconId;
+
+  int16_t rawRssi = (info->rx_ctrl != nullptr) ? info->rx_ctrl->rssi : RSSI_UNAVAILABLE;
+
   AnchorReport report;
   report.anchorId = ANCHOR_ID;   // <-- This comes from build flag!
-  report.rssi = (info->rx_ctrl != nullptr) ? info->rx_ctrl->rssi : RSSI_UNAVAILABLE;
+  report.beaconSeq = lastBeaconSeq;
+
+  if (rawRssi == RSSI_UNAVAILABLE) {
+    // Can't smooth what we don't have — pass the sentinel straight through
+    // so the gateway can still tell "packet received, no RSSI support".
+    report.rssi = RSSI_UNAVAILABLE;
+  } else if (firstSample) {
+    smoothedRssi = (float)rawRssi;
+    firstSample = false;
+    report.rssi = rawRssi;
+  } else if (fabsf((float)rawRssi - smoothedRssi) > OUTLIER_THRESHOLD_DB) {
+    // Likely a multipath spike / bad packet — skip updating the average,
+    // but still report the last-known-good smoothed value so the gateway
+    // doesn't see a gap.
+    report.rssi = (int16_t)smoothedRssi;
+  } else {
+    smoothedRssi = EMA_ALPHA * (float)rawRssi + (1.0f - EMA_ALPHA) * smoothedRssi;
+    report.rssi = (int16_t)smoothedRssi;
+  }
 
   esp_now_send(gatewayMac, (uint8_t *)&report, sizeof(report));
 }
@@ -129,6 +172,7 @@ void loop_anchor() {
 #ifdef NODE_ROLE_GATEWAY
 
 int16_t rssiValues[3] = {-100, -100, -100};
+uint16_t beaconSeqValues[3] = {0, 0, 0};
 bool receivedFlags[3] = {false, false, false};
 unsigned long lastPacketTime[3] = {0};
 const unsigned long TIMEOUT = 200;
@@ -167,6 +211,7 @@ void handleGatewayReport(const AnchorReport &report) {
 
   anchorReady[report.anchorId] = true;
   rssiValues[report.anchorId] = report.rssi;
+  beaconSeqValues[report.anchorId] = report.beaconSeq;
   receivedFlags[report.anchorId] = true;
   lastPacketTime[report.anchorId] = millis();
   lastMobileActivity = millis();
@@ -174,12 +219,14 @@ void handleGatewayReport(const AnchorReport &report) {
   Serial.print("[RX] Anchor ");
   Serial.print(report.anchorId);
   Serial.print(" RSSI=");
-  Serial.println(report.rssi);
+  Serial.print(report.rssi);
+  Serial.print(" seq=");
+  Serial.println(report.beaconSeq);
 }
 
 void onDataRecv_gateway(const esp_now_recv_info_t *info, const uint8_t *incomingData, int len) {
   if (len != sizeof(AnchorReport)) return;
-  
+
   AnchorReport report;
   memcpy(&report, incomingData, sizeof(report));
 
@@ -255,15 +302,28 @@ void loop_gateway() {
       }
     }
   }
-  
+
   if (allFresh) {
+    // Format: [GW] CSV: <millis>,<rssi0>,<seq0>,<rssi1>,<seq1>,<rssi2>,<seq2>
+    // millis() gives a monotonic timestamp for dt calculations downstream
+    // (e.g. Kalman filter). Per-anchor beaconSeq lets the PC-side pipeline
+    // confirm whether the three readings correspond to the same (or a
+    // close) mobile beacon transmission before trusting the row.
     Serial.print("[GW] CSV: ");
+    Serial.print(now);
+    Serial.print(",");
     Serial.print(rssiValues[0]);
+    Serial.print(",");
+    Serial.print(beaconSeqValues[0]);
     Serial.print(",");
     Serial.print(rssiValues[1]);
     Serial.print(",");
-    Serial.println(rssiValues[2]);
-    
+    Serial.print(beaconSeqValues[1]);
+    Serial.print(",");
+    Serial.print(rssiValues[2]);
+    Serial.print(",");
+    Serial.println(beaconSeqValues[2]);
+
     for (int i = 0; i < 3; i++) receivedFlags[i] = false;
   }
   delay(10);
