@@ -345,5 +345,5 @@ If you found this project useful or interesting, please consider giving it a sta
 </p>
 
 <p align="center">
-  <strong>Made with ❤️ by Sarpharaj Dewan</strong>
+  <strong>Made with ❤️ by OpenIPS team</strong>
 </p>
